@@ -95,6 +95,7 @@ void serial_cx_reset(void);
 uint32_t serial_cx_read(uint32_t addr);
 void serial_cx_write(uint32_t addr, uint32_t value);
 void serial_byte_in(uint8_t byte);
+bool serial_rx_empty(void);
 
 typedef struct fastboot_state {
     uint32_t mem[0x1000 / sizeof(uint32_t)];
@@ -139,6 +140,7 @@ typedef struct pmu_state {
         uint32_t disable2;
         uint32_t clocks;
         bool on_irq_enabled;
+        uint32_t int_status; /* bit 0: ON key, bit 1: clock change done */
 } pmu_state;
 extern pmu_state pmu;
 
@@ -164,7 +166,8 @@ void timer_cx_write(uint32_t addr, uint32_t value);
 void timer_cx_reset(void);
 
 typedef struct hdq1w_state {
-    uint8_t lcd_contrast;
+    uint8_t lcd_contrast; /* 0 = off, else brightness/contrast for the GUI */
+    uint16_t lcd_reg;     /* raw value of 900F0020 (9 bits on the CX) */
 } hdq1w_state;
 extern hdq1w_state hdq1w;
 

@@ -281,15 +281,17 @@ bool emu_start(unsigned int port_gdb, unsigned int port_rdbg, const char *snapsh
     for (int i = 0x00000; i < 0x80000; i += 4)
         RAM_FLAGS(&rom[i]) = RF_READ_ONLY;
 
-    /* Load the ROM */
-    FILE *f = fopen_utf8(path_boot1.c_str(), "rb");
-    if (!f) {
-        gui_perror(path_boot1.c_str());
-        emu_cleanup();
-        return false;
+    /* Load the ROM. Without one (direct kernel boot) it reads as erased. */
+    if (!path_boot1.empty()) {
+        FILE *f = fopen_utf8(path_boot1.c_str(), "rb");
+        if (!f) {
+            gui_perror(path_boot1.c_str());
+            emu_cleanup();
+            return false;
+        }
+        (void)fread(rom, 1, 0x80000, f);
+        fclose(f);
     }
-    (void)fread(rom, 1, 0x80000, f);
-    fclose(f);
 
     // Warn if the CX II bootrom is missing the key area
     if (emulate_cx2 && std::all_of(rom + 0x27800, rom + 0x28000, [](uint8_t b) { return b == 0; }))

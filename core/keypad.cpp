@@ -31,8 +31,10 @@ void keypad_int_check() {
 
 void keypad_on_pressed() {
     // TODO: The CX II may have an enable bit somewhere
-    if(!emulate_cx2 && pmu.on_irq_enabled)
+    if(!emulate_cx2 && pmu.on_irq_enabled) {
+        pmu.int_status |= 1;
         int_set(INT_POWER, true);
+    }
 
     if(cpu_events & EVENT_SLEEP) {
         assert(emulate_cx2);
@@ -129,6 +131,9 @@ static void keypad_scan_event(int index) {
 void keypad_reset() {
     std::lock_guard<std::recursive_mutex> lg(keypad_mut);
     memset(&keypad.kpc, 0, sizeof keypad.kpc);
+    /* No keys pressed: the classic keypads are active low */
+    if (!emulate_cx)
+        memset(keypad.kpc.data, 0xFF, sizeof keypad.kpc.data);
     keypad.touchpad_page = 0x04;
     sched.items[SCHED_KEYPAD].clock = CLOCK_APB;
     sched.items[SCHED_KEYPAD].second = -1;
@@ -210,6 +215,9 @@ static void touchpad_write(uint8_t addr, uint8_t value) {
 static uint8_t touchpad_read(uint8_t addr) {
     if (addr == 0xFF)
         return keypad.touchpad_page;
+
+    if (keypad.touchpad_page == 0x02 && addr == 0x05)
+        return 0x06; /* product number, as checked by the legacy Linux port */
 
     if (keypad.touchpad_page == 0x10) {
         switch (addr) {
@@ -351,60 +359,180 @@ read_again:
 }
 
 /* 90050000 */
+#define DW_INTR_RX_UNDER  (1 << 0)
+#define DW_INTR_RX_FULL   (1 << 2)
+#define DW_INTR_TX_EMPTY  (1 << 4)
+#define DW_INTR_TX_ABRT   (1 << 6)
+#define DW_INTR_ACTIVITY  (1 << 8)
+#define DW_INTR_STOP_DET  (1 << 9)
+#define DW_INTR_START_DET (1 << 10)
+#define DW_FIFO_DEPTH     16
+#define DW_TOUCHPAD_ADDR  0x20
+
+static uint32_t dw_raw_intr()
+{
+    auto &dw = keypad.touchpad_cx;
+    uint32_t raw = dw.raw_intr;
+    /* Level-triggered bits. Transmission is instant: the TX FIFO is empty. */
+    if (dw.enable & 1)
+        raw |= DW_INTR_TX_EMPTY;
+    if (dw.rx_count > dw.rx_tl)
+        raw |= DW_INTR_RX_FULL;
+    return raw;
+}
+
+static void dw_int_check()
+{
+    int_set(20, dw_raw_intr() & keypad.touchpad_cx.intr_mask);
+}
+
+static void dw_end_transfer()
+{
+    auto &dw = keypad.touchpad_cx;
+    dw.in_transfer = false;
+    dw.state = 0;
+    dw.raw_intr |= DW_INTR_STOP_DET;
+}
+
+static void dw_data_cmd(uint32_t value)
+{
+    auto &dw = keypad.touchpad_cx;
+    if (!(dw.enable & 1))
+        return;
+
+    if (!dw.in_transfer || (value & (1 << 10))) {
+        /* (Re)start condition */
+        dw.raw_intr |= DW_INTR_START_DET;
+        if (!dw.in_transfer)
+            dw.state = 0;
+        dw.in_transfer = true;
+    }
+
+    if ((dw.tar & 0x3FF) != DW_TOUCHPAD_ADDR) {
+        /* Nobody acknowledges the address */
+        dw.abort_source |= 1;
+        dw.raw_intr |= DW_INTR_TX_ABRT;
+        dw_end_transfer();
+        return;
+    }
+
+    bool captivate = emulate_cx2 && (features & 1);
+    if (value & (1 << 8)) {
+        uint8_t byte = captivate ? touchpad_captivate_read() : touchpad_read(dw.port++);
+        if (dw.rx_count < DW_FIFO_DEPTH)
+            dw.rx_fifo[dw.rx_count++] = byte;
+    } else if (captivate) {
+        touchpad_captivate_write(value & 0xFF);
+    } else if (dw.state == 0) {
+        dw.port = value;
+        dw.state = 1;
+    } else {
+        touchpad_write(dw.port++, value);
+    }
+
+    if (value & (1 << 9))
+        dw_end_transfer();
+}
+
 void touchpad_cx_reset(void) {
     std::lock_guard<std::recursive_mutex> lg(keypad_mut);
     keypad.touchpad_cx = {};
+    keypad.touchpad_cx.con = 0x7F;
+    keypad.touchpad_cx.tar = 0x55;
 }
 uint32_t touchpad_cx_read(uint32_t addr) {
     std::lock_guard<std::recursive_mutex> lg(keypad_mut);
+    auto &dw = keypad.touchpad_cx;
+    uint32_t ret;
     switch (addr & 0xFFFF) {
+        case 0x0000: return dw.con;
+        case 0x0004: return dw.tar;
         case 0x0010:
-            if (!keypad.touchpad_cx.reading)
-                break;
-            keypad.touchpad_cx.reading--;
-            if(emulate_cx2 && (features & 1))
-                return touchpad_captivate_read();
-            else
-                return touchpad_read(keypad.touchpad_cx.port++);
-        case 0x0070:
-            return keypad.touchpad_cx.reading ? 12 : 4;
-        case 0x00FC:
-            return 0x44570140;
+            if (!dw.rx_count) {
+                dw.raw_intr |= DW_INTR_RX_UNDER;
+                dw_int_check();
+                return 0;
+            }
+            ret = dw.rx_fifo[0];
+            memmove(dw.rx_fifo, dw.rx_fifo + 1, --dw.rx_count);
+            dw_int_check();
+            return ret;
+        case 0x0014: case 0x0018: case 0x001C: case 0x0020:
+            return dw.hcnt_lcnt[((addr & 0xFF) - 0x14) >> 2];
+        case 0x002C: return dw_raw_intr() & dw.intr_mask;
+        case 0x0030: return dw.intr_mask;
+        case 0x0034: return dw_raw_intr();
+        case 0x0038: return dw.rx_tl;
+        case 0x003C: return dw.tx_tl;
+        case 0x0040: /* CLR_INTR: all edge-triggered bits */
+            dw.raw_intr = 0;
+            dw.abort_source = 0;
+            dw_int_check();
+            return 0;
+        case 0x0044: dw.raw_intr &= ~DW_INTR_RX_UNDER; dw_int_check(); return 0;
+        case 0x0048: dw.raw_intr &= ~(1 << 1); dw_int_check(); return 0;
+        case 0x004C: dw.raw_intr &= ~(1 << 3); dw_int_check(); return 0;
+        case 0x0050: dw.raw_intr &= ~(1 << 5); dw_int_check(); return 0;
+        case 0x0054:
+            dw.raw_intr &= ~DW_INTR_TX_ABRT;
+            dw.abort_source = 0;
+            dw_int_check();
+            return 0;
+        case 0x0058: dw.raw_intr &= ~(1 << 7); dw_int_check(); return 0;
+        case 0x005C: dw.raw_intr &= ~DW_INTR_ACTIVITY; dw_int_check(); return 0;
+        case 0x0060: dw.raw_intr &= ~DW_INTR_STOP_DET; dw_int_check(); return 0;
+        case 0x0064: dw.raw_intr &= ~DW_INTR_START_DET; dw_int_check(); return 0;
+        case 0x0068: dw.raw_intr &= ~(1 << 11); dw_int_check(); return 0;
+        case 0x006C: return dw.enable;
+        case 0x0070: /* STATUS: TFNF | TFE | RFNE */
+            return 0x6 | (dw.rx_count ? 0x8 : 0);
+        case 0x0074: return 0;
+        case 0x0078: return dw.rx_count;
+        case 0x007C: return dw.sda_hold;
+        case 0x0080: return dw.abort_source;
+        case 0x0094: return dw.sda_setup;
+        case 0x009C: return dw.enable & 1;
+        case 0x00A0: return dw.fs_spklen;
+        case 0x00F4: /* COMP_PARAM_1: 16 deep FIFOs, fast mode, 32 bit APB */
+            return ((DW_FIFO_DEPTH - 1) << 16) | ((DW_FIFO_DEPTH - 1) << 8) | (2 << 2) | 2;
+        case 0x00F8: return 0x3131312A; /* 1.11a */
+        case 0x00FC: return 0x44570140;
         default:
             return 0;
     }
-    return bad_read_word(addr);
 }
 void touchpad_cx_write(uint32_t addr, uint32_t value) {
     std::lock_guard<std::recursive_mutex> lg(keypad_mut);
+    auto &dw = keypad.touchpad_cx;
     switch (addr & 0xFFFF) {
-        case 0x0010:
-            if(emulate_cx2 && (features & 1)) {
-                if (value & 0x100)
-                    keypad.touchpad_cx.reading++;
-                else
-                    touchpad_captivate_write(value & 0xFF);
-
-                return;
-            }
-
-            if (keypad.touchpad_cx.state == 0) {
-                keypad.touchpad_cx.port = value;
-                keypad.touchpad_cx.state = 1;
-            } else {
-                if (value & 0x100) {
-                    keypad.touchpad_cx.reading++;
-                } else {
-                    touchpad_write(keypad.touchpad_cx.port++, value);
-                }
-            }
+        case 0x0000: dw.con = value; return;
+        case 0x0004: dw.tar = value; return;
+        case 0x0010: dw_data_cmd(value); break;
+        case 0x0014: case 0x0018: case 0x001C: case 0x0020:
+            dw.hcnt_lcnt[((addr & 0xFF) - 0x14) >> 2] = value;
             return;
+        case 0x0030: dw.intr_mask = value & 0xFFF; break;
         case 0x0038:
-            keypad.touchpad_cx.state = 0;
-            keypad.touchpad_cx.reading = 0;
+            dw.rx_tl = value & 0xFF;
+            /* The TI OS writes this before every transfer */
+            dw.state = 0;
+            break;
+        case 0x003C: dw.tx_tl = value & 0xFF; break;
+        case 0x006C:
+            dw.enable = value & 1;
+            if (!dw.enable) {
+                dw.rx_count = 0;
+                dw.in_transfer = false;
+                dw.state = 0;
+            }
+            break;
+        case 0x007C: dw.sda_hold = value; return;
+        case 0x0094: dw.sda_setup = value; return;
+        case 0x00A0: dw.fs_spklen = value; return;
+        default:
             return;
     }
-    //bad_write_word(addr, value);
+    dw_int_check();
 }
 
 bool keypad_suspend(emu_snapshot *snapshot)

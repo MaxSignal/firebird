@@ -30,10 +30,17 @@ struct touchpad_gpio_state {
     uint8_t port;
 };
 
+/* Synopsys DesignWare I2C controller at 90050000 with the touchpad at 0x20 */
 struct touchpad_cx_state {
-    int state;
-    int reading;
+    int state;          /* 0: next written byte selects the register */
+    int reading;        /* unused, kept for the snapshot layout */
     uint8_t port;
+    uint32_t con, tar, intr_mask, rx_tl, tx_tl, enable;
+    uint32_t raw_intr, abort_source;
+    uint32_t hcnt_lcnt[4], sda_hold, sda_setup, fs_spklen;
+    uint8_t rx_fifo[16];
+    unsigned int rx_count;
+    bool in_transfer;
 };
 
 struct touchpad_captivate_state {

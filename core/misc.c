@@ -314,6 +314,15 @@ uint32_t watchdog_read(uint32_t addr) {
         case 0x010: return watchdog.interrupt;
         case 0x014: return watchdog.control & watchdog.interrupt;
         case 0xC00: return watchdog.locked;
+        /* PrimeCell IDs of an ARM SP805 */
+        case 0xFE0: return 0x05;
+        case 0xFE4: return 0x18;
+        case 0xFE8: return 0x14;
+        case 0xFEC: return 0x00;
+        case 0xFF0: return 0x0D;
+        case 0xFF4: return 0xF0;
+        case 0xFF8: return 0x05;
+        case 0xFFC: return 0xB1;
         default:
             return bad_read_word(addr);
     }
@@ -488,7 +497,7 @@ uint32_t pmu_read(uint32_t addr) {
         case 0x04: return pmu.wake_mask;
         case 0x08: return 0x2000;
         case 0x0C: return 0;
-        case 0x14: return 0;
+        case 0x14: return pmu.int_status;
         case 0x18: return pmu.disable;
         case 0x20: return pmu.disable2;
         case 0x24: return pmu.clocks;
@@ -530,11 +539,15 @@ void pmu_write(uint32_t addr, uint32_t value) {
                 sched_set_clocks(3, new_rates);
                 //warn("Changed clock speeds: %u %u %u", new_rates[0], new_rates[1], new_rates[2]);
                 pmu.clocks = clocks;
-                int_set(INT_POWER, 1); // CX boot1 expects an interrupt
+                pmu.int_status |= 2; // CX boot1 expects an interrupt
+                int_set(INT_POWER, 1);
             }
             return;
         case 0x10: pmu.on_irq_enabled = value; return;
-        case 0x14: int_set(INT_POWER, 0); return;
+        case 0x14:
+            pmu.int_status &= ~value;
+            int_set(INT_POWER, pmu.int_status != 0);
+            return;
         case 0x18: pmu.disable = value; return;
         case 0x20: pmu.disable2 = value; return;
     }
@@ -649,6 +662,7 @@ hdq1w_state hdq1w;
 
 void hdq1w_reset() {
     hdq1w.lcd_contrast = 0;
+    hdq1w.lcd_reg = 0;
 }
 uint32_t hdq1w_read(uint32_t addr) {
     switch (addr & 0xFFFF) {
@@ -656,7 +670,7 @@ uint32_t hdq1w_read(uint32_t addr) {
         case 0x0C: return 0;
         case 0x10: return 0;
         case 0x14: return 0;
-        case 0x20: return hdq1w.lcd_contrast;
+        case 0x20: return hdq1w.lcd_reg;
     }
     return bad_read_word(addr);
 }
@@ -665,7 +679,14 @@ void hdq1w_write(uint32_t addr, uint32_t value) {
         case 0x04: return;
         case 0x0C: return;
         case 0x14: return;
-        case 0x20: hdq1w.lcd_contrast = value; return;
+        case 0x20:
+            hdq1w.lcd_reg = value & 0x1FF;
+            /* On the CX, 0x100 is backlight off and 0x1D0 about the maximum */
+            if (emulate_cx)
+                hdq1w.lcd_contrast = hdq1w.lcd_reg <= 0x100 ? 0 : ((hdq1w.lcd_reg - 0x100) > 255 ? 255 : (hdq1w.lcd_reg - 0x100));
+            else
+                hdq1w.lcd_contrast = value;
+            return;
     }
     bad_write_word(addr, value);
 }

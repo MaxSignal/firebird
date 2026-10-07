@@ -8,6 +8,7 @@
 #include "os/os.h"
 
 FILE *xmodem_file;
+static uint8_t serial_last_rx;
 uint8_t xmodem_buf[0x84];
 int xmodem_buf_pos;
 
@@ -97,7 +98,7 @@ uint32_t serial_read(uint32_t addr) {
             if (serial.LCR & 0x80)
                 return serial.DLL; /* Divisor Latch LSB */
             if (!(serial.interrupts & 1))
-                error("Attempted to read empty RBR");
+                return serial_last_rx; /* real UARTs return stale data */
             uint8_t byte = serial.rx_char;
             serial.interrupts &= ~1;
             serial_int_check();
@@ -166,8 +167,15 @@ bool serial_cx_suspend(emu_snapshot *snapshot)
     return snapshot_write(snapshot, &serial_cx, sizeof(serial_cx));
 }
 
+/*
+ * Transmission is instantaneous, so the TX FIFO is always below its trigger
+ * level and TXRIS (bit 5) stays set, as on a PL011 with an idle transmitter.
+ */
+static inline uint32_t serial_cx_ris() {
+    return serial_cx.int_status | 0x20;
+}
 static inline void serial_cx_int_check() {
-    int_set(INT_SERIAL, serial_cx.int_status & serial_cx.int_mask);
+    int_set(INT_SERIAL, serial_cx_ris() & serial_cx.int_mask);
 }
 void serial_cx_reset() {
     if (xmodem_file) {
@@ -181,7 +189,7 @@ uint32_t serial_cx_read(uint32_t addr) {
     switch (addr & 0xFFFF) {
         case 0x000:
             if (!(serial_cx.rx & 1))
-                error("Attempted to read empty RBR");
+                return serial_last_rx; /* real UARTs return stale data */
             uint8_t byte = serial_cx.rx_char;
             serial_cx.rx = 0;
             serial_cx.int_status &= ~0x10;
@@ -192,9 +200,10 @@ uint32_t serial_cx_read(uint32_t addr) {
         case 0x024: return 0;
         case 0x028: return 0;
         case 0x02C: return 0;
-        case 0x040: return serial_cx.int_status & serial_cx.int_mask;
+        case 0x03C: return serial_cx_ris();
+        case 0x040: return serial_cx_ris() & serial_cx.int_mask;
         case 0x030: return serial_cx.cr;
-        case 0x038: return 0;
+        case 0x038: return serial_cx.int_mask;
         case 0xFE0: return 0x11;
         case 0xFE4: return 0x10;
         case 0xFE8: return 0x34;
@@ -227,7 +236,12 @@ void serial_cx_write(uint32_t addr, uint32_t value) {
     bad_write_word(addr, value);
 }
 
+bool serial_rx_empty(void) {
+    return emulate_cx ? !(serial_cx.rx & 1) : !(serial.interrupts & 1);
+}
+
 void serial_byte_in(uint8_t byte) {
+    serial_last_rx = byte;
     if (!emulate_cx) {
         serial.rx_char = byte;
         serial.interrupts |= 1;

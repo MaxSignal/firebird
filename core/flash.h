@@ -97,8 +97,9 @@ typedef struct nand_state {
     bool nand_writable, nand_block_modified[2048];
     uint32_t nand_row, nand_col;
     uint8_t nand_addr_state, nand_area_pointer;
-    uint8_t nand_buffer[0x840];
+    uint8_t nand_buffer[0x840]; /* whole page being programmed */
     int nand_buffer_pos, state;
+    int nand_wcol;              /* program column, -1: not set yet */
 } nand_state;
 
 extern nand_state nand;

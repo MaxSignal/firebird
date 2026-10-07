@@ -59,9 +59,9 @@ void nand_write_command_byte(uint8_t command) {
             if (nand.state == 0x80) {
                 if (!nand.nand_writable)
                     error("program with write protect on");
-                uint8_t *pagedata = &nand_data[nand.nand_row * nand.metrics.page_size + nand.nand_col];
+                uint8_t *pagedata = &nand_data[nand.nand_row * nand.metrics.page_size];
                 int i;
-                for (i = 0; i < nand.nand_buffer_pos; i++)
+                for (i = 0; i < nand.metrics.page_size; i++)
                     pagedata[i] &= nand.nand_buffer[i];
                 nand.nand_block_modified[nand.nand_row >> nand.metrics.log2_pages_per_block] = true;
                 nand.state = 0xFF;
@@ -69,12 +69,30 @@ void nand_write_command_byte(uint8_t command) {
             break;
         case 0x30: // READSTART
             break;
+        case 0x05: // RNDOUT: new column within the page being read
+            if (nand.metrics.page_size < 0x800)
+                goto unknown;
+            nand.nand_addr_state = 0;
+            nand.state = 0x05;
+            break;
+        case 0xE0: // RNDOUTSTART
+            if (nand.state == 0x05)
+                nand.state = 0x00;
+            break;
+        case 0x85: // RNDIN: new column within the page being programmed
+            if (nand.metrics.page_size < 0x800 || nand.state != 0x80)
+                goto unknown;
+            nand.nand_addr_state = 0;
+            nand.state = 0x85;
+            break;
         case 0x60: // ERASE1
             nand.nand_addr_state = 2;
             nand.state = command;
             break;
         case 0x80: // SEQIN
             nand.nand_buffer_pos = 0;
+            nand.nand_wcol = -1;
+            memset(nand.nand_buffer, 0xFF, sizeof(nand.nand_buffer));
             nand.nand_addr_state = 0;
             nand.state = command;
             break;
@@ -127,6 +145,14 @@ void nand_write_address_byte(uint8_t byte) {
             break;
         case 1:
             nand.nand_col = (nand.nand_col & 0xFF) | (byte << 8);
+            if (nand.state == 0x05 || nand.state == 0x85) {
+                if (nand.state == 0x85) {
+                    /* Continue filling the program buffer at the new column */
+                    nand.state = 0x80;
+                    nand.nand_wcol = nand.nand_col;
+                }
+                nand.nand_addr_state = 6;
+            }
             break;
         default: {
             int bit = (nand.nand_addr_state - 3) * 8;
@@ -166,21 +192,25 @@ uint32_t nand_read_data_word() {
                 return 0;
             }
             return *(uint32_t *)&nand_data[nand.nand_row * nand.metrics.page_size + (nand.nand_col += 4) - 4];
-        case 0x70: return 0x40 | (nand.nand_writable << 7); // Status register
-        case 0x90: nand.state = 0xFF; return nand.metrics.chip_model << 8 | nand.metrics.chip_manuf;
-        default:
-            //warn("NAND read word in state %02X", nand.state);
-            return 0;
+        default: {
+            /* An 8-bit chip: a word access is four byte cycles */
+            uint32_t word = 0;
+            for (int i = 0; i < 4; i++)
+                word |= (uint32_t)nand_read_data_byte() << (8 * i);
+            return word;
+        }
     }
 }
 void nand_write_data_byte(uint8_t value) {
     //putchar('w');
     switch (nand.state) {
         case 0x80:
-            if (nand.nand_buffer_pos + nand.nand_col >= nand.metrics.page_size)
+            if (nand.nand_wcol < 0)
+                nand.nand_wcol = nand.nand_col;
+            if (nand.nand_wcol >= nand.metrics.page_size)
                 warn("NAND write past end of page");
             else
-                nand.nand_buffer[nand.nand_buffer_pos++] = value;
+                nand.nand_buffer[nand.nand_wcol++] = value;
             return;
         default:
             warn("NAND write in state %02X", nand.state);
@@ -191,12 +221,13 @@ void nand_write_data_word(uint32_t value) {
     //putchar('W');
     switch (nand.state) {
         case 0x80:
-            if (nand.nand_buffer_pos + nand.nand_col + 4 > nand.metrics.page_size)
+            if (nand.nand_wcol < 0)
+                nand.nand_wcol = nand.nand_col;
+            if (nand.nand_wcol + 4 > nand.metrics.page_size)
                 warn("NAND write past end of page");
             else {
-                //*(uint32_t *)&nand.nand_buffer[nand.nand_buffer_pos] = value;
-                memcpy(&nand.nand_buffer[nand.nand_buffer_pos], &value, sizeof(value));
-                nand.nand_buffer_pos += 4;
+                memcpy(&nand.nand_buffer[nand.nand_wcol], &value, sizeof(value));
+                nand.nand_wcol += 4;
             }
             break;
         default:

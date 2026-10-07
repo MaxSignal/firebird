@@ -123,6 +123,8 @@ void throttle_interval_event(int index)
     const auto virt_throttle_interval = std::chrono::milliseconds(10);
 
     usblink_timer();
+    if (!emulate_cx2)
+        rtc_tick();
 
     usblink_queue_do();
 

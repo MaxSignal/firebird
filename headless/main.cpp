@@ -40,6 +40,7 @@ static std::string wait_for, out_tail;
 static int delay_ticks;
 static int timeout_ticks = -1;
 static bool echo_script;
+static bool realtime;
 
 static void script_step();
 
@@ -128,7 +129,8 @@ void gui_show_speed(double d) { (void)d; }
 void gui_usblink_changed(bool state) { (void)state; }
 void throttle_timer_off() {}
 void throttle_timer_on() {}
-void throttle_timer_wait(unsigned int usec) { (void)usec; }
+/* Only used with --realtime: keep virtual time in step with the host clock */
+void throttle_timer_wait(unsigned int usec) { usleep(usec); }
 
 static void script_command(const std::string &line)
 {
@@ -270,6 +272,7 @@ static const char OPT_KERNEL[]             = "--kernel";
 static const char OPT_DTB[]                = "--dtb";
 static const char OPT_TIMEOUT[]            = "--timeout";
 static const char OPT_ECHO[]               = "--echo-script";
+static const char OPT_REALTIME[]           = "--realtime";
 static const char OPT_DEBUG_ON_START[]     = "--debug-on-start";
 static const char OPT_DEBUG_ON_WARN[]      = "--debug-on-warn";
 static const char OPT_PRINT_ON_WARN[]      = "--print-on-warn";
@@ -300,6 +303,7 @@ void show_help_menu(void)
 	fprintf(stderr, "  %-24s Device tree blob passed to the kernel\n", OPT_DTB);
 	fprintf(stderr, "  %-24s Exit with code 124 after this many virtual seconds\n", OPT_TIMEOUT);
 	fprintf(stderr, "  %-24s Print script commands to stderr\n", OPT_ECHO);
+	fprintf(stderr, "  %-24s Run at real speed (the RTC follows the host clock)\n", OPT_REALTIME);
 	fprintf(stderr, "  %-24s Enter debugger on start\n", OPT_DEBUG_ON_START);
 	fprintf(stderr, "  %-24s Enter debugger on warnings\n", OPT_DEBUG_ON_WARN);
 	fprintf(stderr, "  %-24s Print warnings to console\n", OPT_PRINT_ON_WARN);
@@ -320,7 +324,7 @@ int main(int argc, char *argv[])
 		if(argi + 1 >= argc && argv[argi][0] == '-' && strcmp(argv[argi], OPT_HELP)
 		   && strcmp(argv[argi], OPT_DEBUG_ON_START) && strcmp(argv[argi], OPT_DEBUG_ON_WARN)
 		   && strcmp(argv[argi], OPT_PRINT_ON_WARN) && strcmp(argv[argi], OPT_DIAGS)
-		   && strcmp(argv[argi], OPT_ECHO))
+		   && strcmp(argv[argi], OPT_ECHO) && strcmp(argv[argi], OPT_REALTIME))
 		{
 			fprintf(stderr, "Missing value for '%s'.\n", argv[argi]);
 			return 1;
@@ -346,6 +350,8 @@ int main(int argc, char *argv[])
 			timeout_ticks = atoi(argv[++argi]) * 100;
 		else if(strcmp(argv[argi], OPT_ECHO) == 0)
 			echo_script = true;
+		else if(strcmp(argv[argi], OPT_REALTIME) == 0)
+			realtime = true;
 		else if(strcmp(argv[argi], OPT_DEBUG_ON_START) == 0)
 			debug_on_start = true;
 		else if(strcmp(argv[argi], OPT_DEBUG_ON_WARN) == 0)
@@ -432,7 +438,7 @@ int main(int argc, char *argv[])
 		arm.reg[15] = kernel_base;
 	}
 
-	turbo_mode = true;
+	turbo_mode = !realtime;
 	emu_loop(false);
 
 	return 0;

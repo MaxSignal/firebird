@@ -124,9 +124,12 @@ void unknown_9008_write(uint32_t addr, uint32_t value);
 
 typedef struct rtc_state {
     time_t offset;
+    uint32_t alarm, set_value, last_time;
+    uint8_t int_mask, int_status;
 } rtc_state;
 
 void rtc_reset();
+void rtc_tick();
 uint32_t rtc_read(uint32_t addr);
 void rtc_write(uint32_t addr, uint32_t value);
 

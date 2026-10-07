@@ -9,6 +9,7 @@ extern "C" {
 
 #define INT_SERIAL   1
 #define INT_WATCHDOG 3
+#define INT_RTC      4
 #define INT_USB      8
 #define INT_ADC      11
 #define INT_POWER    15

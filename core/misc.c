@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -393,11 +394,38 @@ struct rtc_state rtc;
 
 void rtc_reset() {
     rtc.offset = 0;
+    rtc.alarm = rtc.set_value = 0;
+    rtc.int_mask = rtc.int_status = 0;
+    rtc.last_time = time(NULL);
+}
+
+static uint32_t rtc_now() {
+    return time(NULL) - rtc.offset;
+}
+
+static void rtc_int_check() {
+    int_set(INT_RTC, rtc.int_status & rtc.int_mask);
+}
+
+/* Called periodically: the alarm fires when the time passes its value */
+void rtc_tick() {
+    uint32_t now = rtc_now();
+    if ((int32_t)(rtc.last_time - rtc.alarm) < 0 && (int32_t)(now - rtc.alarm) >= 0) {
+        rtc.int_status = 1;
+        rtc_int_check();
+        if (getenv("FIREBIRD_DEBUG_RTC"))
+            fprintf(stderr, "[firebird] RTC alarm %u fired, mask %u\n", rtc.alarm, rtc.int_mask);
+    }
+    rtc.last_time = now;
 }
 
 uint32_t rtc_read(uint32_t addr) {
     switch (addr & 0xFFFF) {
-        case 0x00: return time(NULL) - rtc.offset;
+        case 0x00: return rtc_now();
+        case 0x04: return rtc.alarm;
+        case 0x08: return rtc.set_value;
+        case 0x0C: return rtc.int_mask;
+        case 0x10: return rtc.int_status & rtc.int_mask;
         case 0x14: return 0;
         case 0xFE0: return 0x31;
         case 0xFE4: return 0x10;
@@ -408,10 +436,14 @@ uint32_t rtc_read(uint32_t addr) {
 }
 void rtc_write(uint32_t addr, uint32_t value) {
     switch (addr & 0xFFFF) {
-        case 0x04: return;
-        case 0x08: rtc.offset = time(NULL) - value; return;
-        case 0x0C: return;
-        case 0x10: return;
+        case 0x04: rtc.alarm = value; rtc.last_time = rtc_now(); return;
+        case 0x08:
+            rtc.set_value = value;
+            rtc.offset = time(NULL) - value;
+            rtc.last_time = value;
+            return;
+        case 0x0C: rtc.int_mask = value & 1; rtc_int_check(); return;
+        case 0x10: rtc.int_status &= ~value; rtc_int_check(); return;
         case 0x1C: return;
     }
     bad_write_word(addr, value);

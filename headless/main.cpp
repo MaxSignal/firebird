@@ -41,6 +41,15 @@ static int delay_ticks;
 static int timeout_ticks = -1;
 static bool echo_script;
 static bool realtime;
+static bool save_flash;
+
+static void finish(int code)
+{
+    fflush(stdout);
+    if (save_flash)
+        flash_save_changes();
+    _exit(code);
+}
 
 static void script_step();
 
@@ -51,8 +60,7 @@ void gui_do_stuff(bool wait)
     /* Called every virtual 10ms */
     if (timeout_ticks >= 0 && --timeout_ticks < 0) {
         fprintf(stderr, "\n[firebird] timeout\n");
-        fflush(stdout);
-        _exit(124);
+        finish(124);
     }
 
     if (delay_ticks > 0)
@@ -162,8 +170,7 @@ static void script_command(const std::string &line)
         if (sscanf(arg, "%f %f %d %d", &x, &y, &contact, &down) == 4)
             touchpad_set_state(x, y, contact, down);
     } else if (!strcmp(cmd, "quit")) {
-        fflush(stdout);
-        _exit(atoi(arg));
+        finish(atoi(arg));
     } else {
         fprintf(stderr, "[firebird] unknown command '%s'\n", line.c_str());
     }
@@ -273,6 +280,8 @@ static const char OPT_DTB[]                = "--dtb";
 static const char OPT_TIMEOUT[]            = "--timeout";
 static const char OPT_ECHO[]               = "--echo-script";
 static const char OPT_REALTIME[]           = "--realtime";
+static const char OPT_LOAD[]               = "--load";
+static const char OPT_SAVE_FLASH[]         = "--save-flash";
 static const char OPT_DEBUG_ON_START[]     = "--debug-on-start";
 static const char OPT_DEBUG_ON_WARN[]      = "--debug-on-warn";
 static const char OPT_PRINT_ON_WARN[]      = "--print-on-warn";
@@ -304,6 +313,8 @@ void show_help_menu(void)
 	fprintf(stderr, "  %-24s Exit with code 124 after this many virtual seconds\n", OPT_TIMEOUT);
 	fprintf(stderr, "  %-24s Print script commands to stderr\n", OPT_ECHO);
 	fprintf(stderr, "  %-24s Run at real speed (the RTC follows the host clock)\n", OPT_REALTIME);
+	fprintf(stderr, "  %-24s ADDR=FILE: also load FILE into RAM at ADDR (e.g. an initrd)\n", OPT_LOAD);
+	fprintf(stderr, "  %-24s Write the changes to the flash image back on exit\n", OPT_SAVE_FLASH);
 	fprintf(stderr, "  %-24s Enter debugger on start\n", OPT_DEBUG_ON_START);
 	fprintf(stderr, "  %-24s Enter debugger on warnings\n", OPT_DEBUG_ON_WARN);
 	fprintf(stderr, "  %-24s Print warnings to console\n", OPT_PRINT_ON_WARN);
@@ -316,6 +327,7 @@ int main(int argc, char *argv[])
 	const char *boot1 = nullptr, *flash = nullptr, *snapshot = nullptr, *rampayload = nullptr;
 	const char *model = nullptr, *kernel = nullptr, *dtb = nullptr;
 	uint32_t rampayload_base = default_rampayload_base;
+	std::vector<std::pair<uint32_t, std::string>> extra_loads;
 
 	setvbuf(stdout, nullptr, _IONBF, 0);
 
@@ -324,7 +336,8 @@ int main(int argc, char *argv[])
 		if(argi + 1 >= argc && argv[argi][0] == '-' && strcmp(argv[argi], OPT_HELP)
 		   && strcmp(argv[argi], OPT_DEBUG_ON_START) && strcmp(argv[argi], OPT_DEBUG_ON_WARN)
 		   && strcmp(argv[argi], OPT_PRINT_ON_WARN) && strcmp(argv[argi], OPT_DIAGS)
-		   && strcmp(argv[argi], OPT_ECHO) && strcmp(argv[argi], OPT_REALTIME))
+		   && strcmp(argv[argi], OPT_ECHO) && strcmp(argv[argi], OPT_REALTIME)
+		   && strcmp(argv[argi], OPT_SAVE_FLASH))
 		{
 			fprintf(stderr, "Missing value for '%s'.\n", argv[argi]);
 			return 1;
@@ -352,6 +365,17 @@ int main(int argc, char *argv[])
 			echo_script = true;
 		else if(strcmp(argv[argi], OPT_REALTIME) == 0)
 			realtime = true;
+		else if(strcmp(argv[argi], OPT_SAVE_FLASH) == 0)
+			save_flash = true;
+		else if(strcmp(argv[argi], OPT_LOAD) == 0)
+		{
+			const char *spec = argv[++argi], *eq = strchr(spec, '=');
+			if (!eq) {
+				fprintf(stderr, "%s expects ADDR=FILE.\n", OPT_LOAD);
+				return 1;
+			}
+			extra_loads.emplace_back(strtoul(spec, nullptr, 0), std::string(eq + 1));
+		}
 		else if(strcmp(argv[argi], OPT_DEBUG_ON_START) == 0)
 			debug_on_start = true;
 		else if(strcmp(argv[argi], OPT_DEBUG_ON_WARN) == 0)
@@ -413,6 +437,10 @@ int main(int argc, char *argv[])
 		// Jump to payload
 		arm.reg[15] = rampayload_base;
 	}
+
+	for (auto &load : extra_loads)
+		if (!load_file(load.second.c_str(), load.first, nullptr))
+			return 3;
 
 	if(kernel)
 	{

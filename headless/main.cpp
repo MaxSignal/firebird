@@ -16,6 +16,7 @@
 #include "core/emu.h"
 #include "core/flash.h"
 #include "core/keypad.h"
+#include "core/lcd.h"
 #include "core/mem.h"
 #include "core/misc.h"
 #include "core/mmu.h"
@@ -31,6 +32,7 @@
  *   !key ROW COL 0|1  release/press a key of the keypad matrix
  *   !on 0|1           release/press the ON key
  *   !touch X Y C D    set the touchpad state (X/Y in 0..1, contact, down)
+ *   !screenshot FILE  save the screen as a PPM image
  *   !quit [CODE]      exit
  */
 
@@ -140,6 +142,34 @@ void throttle_timer_on() {}
 /* Only used with --realtime: keep virtual time in step with the host clock */
 void throttle_timer_wait(unsigned int usec) { usleep(usec); }
 
+/* The screen as the LCD shows it: RGB565 on the CX, 4 bit levels of
+ * darkness (0 is white) on the classic models */
+static void save_screenshot(const char *path)
+{
+    static uint16_t frame[320 * 240];
+    lcd_cx_draw_frame(frame);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        perror(path);
+        return;
+    }
+    fprintf(f, "P6\n320 240\n255\n");
+    for (unsigned int i = 0; i < 320 * 240; i++) {
+        uint16_t px = frame[i];
+        uint8_t rgb[3];
+        if (emulate_cx) {
+            rgb[0] = (px >> 11 & 0x1F) << 3;
+            rgb[1] = (px >> 5 & 0x3F) << 2;
+            rgb[2] = (px & 0x1F) << 3;
+        } else {
+            rgb[0] = rgb[1] = rgb[2] = (15 - (px & 0xF)) * 17;
+        }
+        fwrite(rgb, 3, 1, f);
+    }
+    fclose(f);
+}
+
 static void script_command(const std::string &line)
 {
     char cmd[16] = "";
@@ -169,6 +199,8 @@ static void script_command(const std::string &line)
         int contact, down;
         if (sscanf(arg, "%f %f %d %d", &x, &y, &contact, &down) == 4)
             touchpad_set_state(x, y, contact, down);
+    } else if (!strcmp(cmd, "screenshot")) {
+        save_screenshot(arg);
     } else if (!strcmp(cmd, "quit")) {
         finish(atoi(arg));
     } else {

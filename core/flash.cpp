@@ -306,11 +306,22 @@ void nand_phx_write_word(uint32_t addr, uint32_t value) {
                     error("NAND controller: address %x is not in RAM\n", addr);
 
                 if (nand.phx.operation & 0x000800) {
+                    if (!(nand.phx.operation & 0x200000))
+                        warn("NAND controller: write without bit 21, untested on HW");
                     for (i = 0; i < nand.phx.op_size; i++)
                         nand_write_data_byte(ptr[i]);
-                } else {
+                } else if ((nand.phx.operation & 0x200000) ||
+                           !((nand.phx.operation & 0xFF) == 0x00 ||
+                             (nand.phx.operation & 0xFF) == 0x01 ||
+                             (nand.phx.operation & 0xFF) == 0x50)) {
                     for (i = 0; i < nand.phx.op_size; i++)
                         ptr[i] = nand_read_data_byte();
+                } else {
+                    /* As a real Touchpad does for page reads without bit 21
+                     * (which the OS sets; its READ ID works without it):
+                     * each byte of the chip four times in memory */
+                    for (i = 0; i < nand.phx.op_size; i++)
+                        ptr[i] = (i & 3) ? ptr[i - 1] : nand_read_data_byte();
                 }
 
                 if (nand.phx.op_size >= 0x200) { // XXX: what really triggers ECC?

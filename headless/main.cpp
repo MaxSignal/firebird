@@ -20,6 +20,7 @@
 #include "core/mem.h"
 #include "core/misc.h"
 #include "core/mmu.h"
+#include "core/usblink.h"
 #include "core/usblink_queue.h"
 
 /*
@@ -33,6 +34,15 @@
  *   !on 0|1           release/press the ON key
  *   !touch X Y C D    set the touchpad state (X/Y in 0..1, contact, down)
  *   !screenshot FILE  save the screen as a PPM image
+ *   !usbconnect       connect the emulated USB link (usblink)
+ *   !usbls PATH       list a directory of the OS's filesystem
+ *   !usbget PATH FILE copy a file of the OS's filesystem to FILE
+ *   !usbput FILE PATH copy FILE to the OS's filesystem
+ *   !usbdel PATH      delete a file of the OS's filesystem
+ *                     (the script waits until each is done; results go
+ *                     to stderr, as "[usb] ...")
+ *   !dumpmem HEXADDR HEXSIZE FILE  save physical memory to FILE
+ *   !regs             print pc, lr, sp and cpsr to stderr
  *   !quit [CODE]      exit
  */
 
@@ -44,6 +54,21 @@ static int timeout_ticks = -1;
 static bool echo_script;
 static bool realtime;
 static bool save_flash;
+static bool usb_wait;
+
+static void usb_progress(int progress, void *what)
+{
+    if (progress < 0 || progress == 100)
+        fprintf(stderr, "[usb] %s: %s\n", (const char *)what, progress < 0 ? "error" : "done");
+}
+
+static void usb_dirent(struct usblink_file *f, bool is_error, void *)
+{
+    if (f)
+        fprintf(stderr, "[usb] %s %u%s\n", f->filename, f->size, f->is_dir ? " dir" : "");
+    else
+        fprintf(stderr, "[usb] list %s\n", is_error ? "error" : "end");
+}
 
 static void finish(int code)
 {
@@ -201,6 +226,37 @@ static void script_command(const std::string &line)
             touchpad_set_state(x, y, contact, down);
     } else if (!strcmp(cmd, "screenshot")) {
         save_screenshot(arg);
+    } else if (!strcmp(cmd, "dumpmem")) {
+        unsigned long addr, size; char file[512];
+        if (sscanf(arg, "%lx %lx %511s", &addr, &size, file) == 3) {
+            FILE *f = fopen(file, "wb");
+            for (unsigned long a = addr; f && a < addr + size; a += 4) {
+                uint32_t *p = (uint32_t *)phys_mem_ptr(a, 4);
+                uint32_t v = p ? *p : 0;
+                fwrite(&v, 4, 1, f);
+            }
+            if (f) fclose(f);
+        }
+    } else if (!strcmp(cmd, "usbconnect")) {
+        usblink_connect();
+    } else if (!strcmp(cmd, "usbls")) {
+        usblink_queue_dirlist(arg, usb_dirent, nullptr);
+        usb_wait = true;
+    } else if (!strcmp(cmd, "usbget")) {
+        char remote[512], local[512];
+        if (sscanf(arg, "%511s %511s", remote, local) == 2)
+            usblink_queue_download(remote, local, usb_progress, (void *)"get");
+        usb_wait = true;
+    } else if (!strcmp(cmd, "usbput")) {
+        char local[512], remote[512];
+        if (sscanf(arg, "%511s %511s", local, remote) == 2)
+            usblink_queue_put_file(local, remote, usb_progress, (void *)"put");
+        usb_wait = true;
+    } else if (!strcmp(cmd, "usbdel")) {
+        usblink_queue_delete(arg, false, usb_progress, (void *)"delete");
+        usb_wait = true;
+    } else if (!strcmp(cmd, "regs")) {
+        fprintf(stderr, "[firebird] pc=%08x lr=%08x sp=%08x cpsr=%08x\n", arm.reg[15], arm.reg[14], arm.reg[13], get_cpsr());
     } else if (!strcmp(cmd, "quit")) {
         finish(atoi(arg));
     } else {
@@ -217,6 +273,12 @@ static void script_step()
             serial_tx.pop_front();
         }
         return;
+    }
+
+    if (usb_wait) {
+        if (usblink_queue_size())
+            return;
+        usb_wait = false;
     }
 
     while (wait_for.empty() && delay_ticks == 0 && serial_tx.empty() && !script.empty()) {

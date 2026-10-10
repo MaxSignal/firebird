@@ -334,11 +334,15 @@ static bool create_flash(const char *path, const char *model)
         product = 0x100;
         features = 0x005; /* HW-A */
         is_cx = true;
+    } else if (!strcmp(model, "cxw")) {
+        product = 0x100;
+        features = FEATURE_HWW; /* the 240x320 LCD */
+        is_cx = true;
     } else if (!strcmp(model, "tp") || !strcmp(model, "clp")) {
         product = 0x0E0;
         is_cx = false;
     } else {
-        fprintf(stderr, "Unknown model '%s' (cx, tp, clp)\n", model);
+        fprintf(stderr, "Unknown model '%s' (cx, cxw, tp, clp)\n", model);
         return false;
     }
 
@@ -397,7 +401,7 @@ void show_help_menu(void)
 	fprintf(stderr, "  %-24s Show this help menu\n", OPT_HELP);
 	fprintf(stderr, "  %-24s Path to Boot1 image (optional with %s)\n", OPT_BOOT1, OPT_KERNEL);
 	fprintf(stderr, "  %-24s Path to Flash image (required)\n", OPT_FLASH);
-	fprintf(stderr, "  %-24s Create the flash image first if it does not exist: cx, tp, clp\n", OPT_MODEL);
+	fprintf(stderr, "  %-24s Create the flash image first if it does not exist: cx, cxw (HW-W), tp, clp\n", OPT_MODEL);
 	fprintf(stderr, "  %-24s Path to snapshot image (optional)\n", OPT_SNAPSHOT);
 	fprintf(stderr, "  %-24s Path to RAM payload (optional)\n", OPT_RAMPAYLOAD);
 	fprintf(stderr, "  %-24s Address to load RAM payload at (default: 0x%x)\n",
@@ -551,6 +555,17 @@ int main(int argc, char *argv[])
 			pmu_write(0x900B0000, 0x561002);
 			pmu_write(0x900B000C, 4);
 			pmu_write(0x900B0014, 3);
+		}
+
+		/*
+		 * The LCD controller as the OS leaves it on HW-W: 240 pixel lines,
+		 * 320 of them, RGB565, the OS's picture turned
+		 */
+		if ((features & FEATURE_HWW) == FEATURE_HWW) {
+			lcd_write_word(0xC0000000, 38 << 24 | 50 << 16 | 1 << 8 | 14 << 2);
+			lcd_write_word(0xC0000004, 4 << 24 | 2 << 16 | 2 << 10 | 319);
+			lcd_write_word(0xC0000008, 239 << 16 | 1 << 12 | 1 << 11 | 3);
+			lcd_write_word(0xC0000018, 1 << 11 | 1 << 8 | 6 << 1 | 1 << 5 | 1);
 		}
 
 		/* ARM Linux boot protocol: r0 = 0, r1 = machine (unused with DT), r2 = DTB */
